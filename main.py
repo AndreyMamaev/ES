@@ -1,8 +1,14 @@
 import pandas as pd
 import PySimpleGUI as sg
 import numpy as np
-from datetime import datetime, timedelta
+import calendar
+from dateutil.relativedelta import relativedelta
+from datetime import datetime
 from typing import List
+from quarter_dates import (
+    get_first_day_of_the_quarter,
+    get_last_day_of_the_quarter
+)
 
 sg.theme('DarkTeal12')
 
@@ -142,7 +148,7 @@ class Window():
                 'Кол-во исключений',
                 'Кпкуо/Кэр: Кол-во ВУД', 'Кпкуо/Кэр: Передано в суд',
                 'Кпкуо/Кэр: Установлено лиц',
-                'Кэву: Сумма прич.', 'Кэву: Сумма возм.',
+                'Кэву: Сумма', 'Кэву: Кол-во',
                 'Кэппл: Кол-во ВУД', 'Кэппл: Передано в суд(>365)',
                 'Кэппл: Передано в суд(<=365)',
                 'Кмпк: Кол-во заяв.', 'Кмпк: Кол-во ВУД',
@@ -201,7 +207,7 @@ class Window():
                 'Коуп: Кол-во искл.', 'Коуп: Кол-во доб.',
                 'Кву: Сумма', 'Кву: Кол-во',
                 'Кву: Кол-во искл.', 'Кву: Кол-во доб.',
-            ]
+            ],
         )
         self.__tabs = []
         self.__open_files()
@@ -214,11 +220,14 @@ class Window():
         Вызывает окно выбора файлов.
         Запысывает пути к выбранным файлам в self.files
         """
-        self.files = sg.popup_get_file(
-            'Select a file',
-            title="File selector",
-            multiple_files=True
-        ).split(';')
+        try:
+            self.files = sg.popup_get_file(
+                'Выберите файлы',
+                title="Выберите файлы",
+                multiple_files=True,
+            ).split(';')
+        except Exception:
+            self.files = []
 
     def __get_dfs(self):
         """
@@ -233,9 +242,11 @@ class Window():
         """
         Проверяет значения словаря self.dfs на наличие
         в df обязательных столбцов.
-        В случае отсутсвия хотя бы одного столбца
+        В случае отсутсвия файлов или хотя бы одного столбца
         вызывает всплывающее окно и прекращает выполнение программы.
         """
+        if len(self.dfs) == 0:
+            return False
         for file_name, df in self.dfs.items():
             diff = self.REQUIRED_COLUMNS.difference(df.columns.values)
             if diff != set():
@@ -255,7 +266,7 @@ class Window():
             [
                 sg.TabGroup([[
                     sg.Tab(
-                        filename,
+                        filename.split('/')[-1],
                         [[sg.Table(
                             values=df.values.tolist(),
                             headings=df.columns.values.tolist(),
@@ -278,6 +289,10 @@ class Window():
         self.__window_loop()
 
     def __create_tabs(self):
+        """
+        Создает группу вкладок для расчета
+         коэффициентов физическких и юридических лиц.
+        """
         self.__create_individ_tab()
         self.__create_legal_tab()
         self.layout += [
@@ -285,6 +300,9 @@ class Window():
         ]
 
     def __create_individ_tab(self):
+        """
+        Создает вкладку для работы с физическими лицами.
+        """
         self.__tabs.append(sg.Tab('Физические лица', [
             [
                 sg.Column([
@@ -321,6 +339,24 @@ class Window():
                         ('Кмпк', 'kmpk'),
                     )
                 ], element_justification='left',),
+                sg.Column(
+                    [
+                        [sg.Input(
+                            key='individ_auto_date',
+                            disabled=True,
+                            size=(14, 1),
+                            enable_events=True
+                        )],
+                        [sg.CalendarButton(
+                            "Заполнить для даты",
+                            close_when_date_chosen=False,
+                            target='individ_auto_date',
+                            format=self.DATE_FORMAT,
+                            size=(12, 2)
+                        )]
+                    ], element_justification='left',
+                ),
+                sg.Column([[]], expand_x=True,),
                 sg.Column([
                     [
                         sg.Text('Исключения:',),
@@ -362,6 +398,7 @@ class Window():
                     'Расчитать',
                     key='individ_calc_report'
                 ),
+                sg.Text('', expand_x=True),
                 sg.Input(
                     visible=False,
                     enable_events=True,
@@ -371,11 +408,25 @@ class Window():
                     'Сохранить как',
                     key='individ_save_button',
                     file_types=(('Excel', '.xlsx'),),
+                ),
+                sg.Input(
+                    visible=False,
+                    enable_events=True,
+                    key='individ_save_abnormal_path'
+                ),
+                sg.FileSaveAs(
+                    'Сохранить аномальные карточки',
+                    key='individ_save_abnormal_button',
+                    file_types=(('Excel', '.xlsx'),),
+                    visible=False
                 )
             ],
         ]))
 
     def __create_legal_tab(self):
+        """
+        Создает вкладку для работы с юридическими лицами.
+        """
         self.__tabs.append(sg.Tab(
             'Юридические лица',
             [
@@ -416,6 +467,13 @@ class Window():
                     sg.FilesBrowse(
                         'Загрузить реестры',
                         target='legal_koup_kvu_files',
+                    ),
+                    sg.Text('Целевой показатель:'),
+                    sg.Spin(
+                        values=[round(i, 2) for i in np.arange(0, 100, 0.01)],
+                        key='legal_target',
+                        initial_value=0,
+                        size=(5, 1)
                     )
                 ],
                 [
@@ -473,7 +531,78 @@ class Window():
         ))
 
     def __check_individ_events(self, event, values):
+        """
+        Проверяет событие и значения переменных окна программы
+        для расчета коэффициентов физических лиц.
+        """
         match event:
+            case 'individ_auto_date':
+                auto_date = datetime.strptime(
+                    values['individ_auto_date'],
+                    self.DATE_FORMAT
+                )
+                self.window['individ_kpkuo_ker_date_start'].update(
+                    get_first_day_of_the_quarter(datetime(
+                        year=auto_date.year-1,
+                        month=auto_date.month,
+                        day=1
+                    )).strftime(self.DATE_FORMAT)
+                )
+                self.window['individ_kpkuo_ker_date_finish'].update(
+                    get_last_day_of_the_quarter(datetime(
+                        year=auto_date.year-1,
+                        month=auto_date.month,
+                        day=1
+                    )).strftime(self.DATE_FORMAT)
+                )
+                self.window['individ_kevu_date_start'].update(
+                    (datetime(
+                        year=auto_date.year-2,
+                        month=auto_date.month,
+                        day=1
+                    ) + relativedelta(months=1)).strftime(self.DATE_FORMAT)
+                )
+                self.window['individ_kevu_date_finish'].update(
+                    datetime(
+                        year=auto_date.year,
+                        month=auto_date.month,
+                        day=calendar.monthrange(
+                            auto_date.year,
+                            auto_date.month
+                        )[1]
+                    ).strftime(self.DATE_FORMAT)
+                )
+                self.window['individ_keppl_date_start'].update(
+                    get_first_day_of_the_quarter(datetime(
+                        year=auto_date.year-3,
+                        month=auto_date.month,
+                        day=1
+                    )).strftime(self.DATE_FORMAT)
+                )
+                self.window['individ_keppl_date_finish'].update(
+                    (get_first_day_of_the_quarter(datetime(
+                        year=auto_date.year-1,
+                        month=auto_date.month,
+                        day=1
+                    )) - relativedelta(days=1)).strftime(self.DATE_FORMAT)
+                )
+                self.window['individ_kmpk_date_start'].update(
+                    datetime(
+                        year=2022,
+                        month=7,
+                        day=1
+                    ).strftime(self.DATE_FORMAT)
+                )
+                self.window['individ_kmpk_date_finish'].update(
+                    datetime(
+                        year=auto_date.year,
+                        month=auto_date.month,
+                        day=calendar.monthrange(
+                            auto_date.year,
+                            auto_date.month
+                        )[1]
+                    ).strftime(self.DATE_FORMAT)
+                )
             case 'individ_exception_file':
                 exceptions = '\n'.join(pd.read_excel(
                     values['individ_exception_file'],
@@ -485,7 +614,17 @@ class Window():
                     values['individ_exceptions'] + exceptions
                 )
             case 'individ_save_path':
-                self.individ_report.to_excel(values['individ_save_path'])
+                with pd.ExcelWriter(values['individ_save_path']) as writer:
+                    self.individ_report.to_excel(writer, sheet_name='full')
+                    self.individ_report.loc[
+                        :,
+                        ['Кпкуо', 'Кэр', 'Кэву', 'Кэппл', 'Кмпк']
+                    ].to_excel(writer, sheet_name='short')
+            case 'individ_save_abnormal_path':
+                self.individ_abnormal.to_excel(
+                    values['individ_save_abnormal_path'],
+                    index=False
+                )
             case 'individ_calc_report':
                 if any([
                     values[v] == '' for v in values if str(v).endswith((
@@ -494,11 +633,14 @@ class Window():
                 ]):
                     sg.popup('Заполните даты расчета коэффициентов')
                 else:
+                    self.individ_report = pd.DataFrame()
+                    self.individ_abnormal = pd.DataFrame()
                     for file_name, df in self.dfs.items():
-                        self.individ_report = pd.DataFrame()
                         report = ES_individ(
                             df=df,
-                            exceptions=values['individ_exceptions'].split('\n'),
+                            exceptions=values[
+                                'individ_exceptions'
+                            ].split('\n'),
                             kpkuo_ker_date_start=datetime.strptime(
                                 values['individ_kpkuo_ker_date_start'],
                                 self.DATE_FORMAT
@@ -535,6 +677,17 @@ class Window():
                         self.individ_report = pd.concat([
                             self.individ_report, report.report
                         ])
+                        self.individ_abnormal = pd.concat([
+                            self.individ_abnormal, report.abnormal
+                        ])
+                        if len(self.individ_abnormal.index) > 0:
+                            self.window[
+                                'individ_save_abnormal_button'
+                            ].update(visible=True)
+                        else:
+                            self.window[
+                                'individ_save_abnormal_button'
+                            ].update(visible=False)
                     self.window['individ_report'].update(
                         [[index] + values for index, values in zip(
                             self.individ_report.index.values.tolist(),
@@ -543,15 +696,21 @@ class Window():
                     )
 
     def __check_legal_events(self, event, values):
+        """
+        Проверяет событие и значения переменных окна программы
+        для расчета коэффициентов юридических лиц.
+        """
         if event == 'legal_koup_kvu_files':
             registries = values['legal_koup_kvu_files'].split(';')
             registry_names = set(
                 map(
                     lambda x: x + '.xlsx',
-                    [reg['name'] for reg in self.legal_registry_tables.values()]
+                    [r['name'] for r in self.legal_registry_tables.values()]
                 )
             )
-            if registry_names.difference([registry.split('/')[-1] for registry in registries]) != set():
+            if registry_names.difference(
+                [registry.split('/')[-1] for registry in registries]
+            ) != set():
                 sg.popup(
                     f'Загрузите 4 файла с названиями\n'
                     f'{chr(10).join(registry_names)}'
@@ -560,7 +719,10 @@ class Window():
             else:
                 for key, reg in self.legal_registry_tables.items():
                     columns = reg['df'].columns.tolist()
-                    registry_file = [registry for registry in registries if reg['name'] + '.xlsx' in registry][0]
+                    registry_file = [
+                        registry for registry in registries
+                        if reg['name'] + '.xlsx' in registry
+                    ][0]
                     new_df = pd.read_excel(registry_file)
                     if 'Подразделение' in reg['df'].columns.values:
                         new_df['Подразделение'] = ''
@@ -577,6 +739,9 @@ class Window():
                                 for tb in self.TB.keys():
                                     if f'({value})' in tb:
                                         new_df.loc[i, column] = tb
+                        elif column.endswith('_Номер карточки'):
+                            for i, value in new_df[column].items():
+                                new_df.loc[i, column] = value.strip(' №')
                     self.legal_registry_tables[key]['df'] = new_df[columns]
                     self.window[key].update(
                         values=self.legal_registry_tables[key]['df'].values.tolist()
@@ -590,7 +755,10 @@ class Window():
                     if event[0] == key:
                         tb = reg['df'].loc[
                             event[2][0],
-                            [column for column in reg['df'].columns if column.endswith('_ТБ')][0]
+                            [
+                                column for column in reg['df'].columns
+                                if column.endswith('_ТБ')
+                            ][0]
                         ]
                         break
                 win = sg.Window(
@@ -639,7 +807,9 @@ class Window():
                             [
                                 [sg.Text(column)],
                                 [
-                                    sg.Input(size=(len(column) + 10, 1))
+                                    sg.Input(
+                                        size=(len(column) + 10, 1),
+                                    )
                                     if not column.endswith((
                                         '_ТБ',
                                         'Подразделение'
@@ -691,14 +861,23 @@ class Window():
                         break
             win.close()
         elif event == 'legal_save_path':
-            self.legal_report.to_excel(values['legal_save_path'])
+            with pd.ExcelWriter(values['legal_save_path']) as writer:
+                self.legal_report.to_excel(writer, sheet_name='full')
+                self.legal_report.loc[:, ['Коуп', 'Кву']].to_excel(
+                    writer,
+                    sheet_name='short'
+                )
         elif event == 'legal_calc_report':
             if '' in (
                 values['legal_koup_kvu_date_start'],
                 values['legal_koup_kvu_date_finish']
             ):
                 sg.popup('Заполните даты расчета коэффициентов')
-            elif any(['' in reg['df']['Подразделение'].values for reg in self.legal_registry_tables.values() if 'Подразделение' in reg['df'].columns.values]):
+            elif any([
+                '' in reg['df']['Подразделение'].values
+                for reg in self.legal_registry_tables.values()
+                if 'Подразделение' in reg['df'].columns.values
+            ]):
                 sg.popup(
                     'Заполните значения подразделений в таблицах реестров'
                 )
@@ -708,8 +887,10 @@ class Window():
                     report = ES_legal(
                         df,
                         registries={
-                            key: reg['df'] for key, reg in self.legal_registry_tables.items()
+                            key: reg['df'] for key, reg
+                            in self.legal_registry_tables.items()
                         },
+                        target=values['legal_target'],
                         koup_kvu_date_start=datetime.strptime(
                             values['legal_koup_kvu_date_start'],
                             self.DATE_FORMAT
@@ -731,6 +912,9 @@ class Window():
                 )
 
     def __window_loop(self):
+        """
+        Рабочий цикл окна программы.
+        """
         while True:
             event, values = self.window.read()
             if event == sg.WIN_CLOSED:
@@ -808,28 +992,50 @@ class ES_individ():
         self.kmpk_date_finish = kmpk_date_finish
         self.TB = df.loc[0, 'ТБ/ЦА']
         self.GOSB = df['Подразделение'].unique().tolist()
+        self.GOSB.sort()
         self.report = pd.DataFrame(
             columns=[
                 'Кпкуо', 'Кэр', 'Кэву', 'Кэппл', 'Кмпк',
                 'Кол-во исключений',
                 'Кпкуо/Кэр: Кол-во ВУД', 'Кпкуо/Кэр: Передано в суд',
                 'Кпкуо/Кэр: Установлено лиц',
-                'Кэву: Сумма прич.', 'Кэву: Сумма возм.',
+                'Кэву: Сумма', 'Кэву: Кол-во',
                 'Кэппл: Кол-во ВУД', 'Кэппл: Передано в суд(>365)',
                 'Кэппл: Передано в суд(<=365)',
                 'Кмпк: Кол-во заяв.', 'Кмпк: Кол-во ВУД',
             ],
-            index=[self.TB] + list(self.GROUP_GOSB[self.TB].keys()) + self.GOSB,
+            index=(
+                [self.TB] +
+                list(self.GROUP_GOSB.get(self.TB, {}).keys()) +
+                self.GOSB
+            ),
             data=0,
         )
+        self.abnormal = pd.DataFrame(columns=self.df.columns.values)
         self.update()
 
     def update(self):
+        """
+        Фильтрует записи DataFrame.
+        Для прошедших фильтрацию создает группы
+        к которым относится запись и вызывает функции
+        для проверки вхождения в коэффициенты.
+        """
+        self.df["Номер карточки"] = self.df["Номер карточки"].apply(
+            lambda x: int(str(x).split('/')[0])
+        )
         for i, row in self.df.iterrows():
-            groups = [self.TB, row['Подразделение']] + [group for group, gosbs in self.GROUP_GOSB[self.TB].items() if row['Подразделение'].strip() in gosbs]
+            groups = (
+                [self.TB, row['Подразделение']] +
+                [
+                    group for group, gosbs
+                    in self.GROUP_GOSB.get(self.TB, {}).items()
+                    if row['Подразделение'].strip() in gosbs
+                ]
+            )
             if (
                 row['Статус КЗОП'] == 'Архив' or
-                row['Вид события'] == 'Мошенничество в корпоративном кредитовании'
+                'Мошенничество в корпоративном кредитовании' in row['Вид события']
             ):
                 continue
             elif row['Номер карточки'] in self.exceptions:
@@ -843,6 +1049,11 @@ class ES_individ():
         self.calc()
 
     def check_kmpk(self, row: pd.Series, groups: List = []):
+        """
+        Проверка для Кмпк.
+        Заполняет поля в результирующем DF
+        в случае соответствия условиям.
+        """
         if row['Потерпевший СБЕР'] == 'false':
             if (
                 row['Дата подачи ЗОП'] != '-' and
@@ -856,6 +1067,11 @@ class ES_individ():
                         self.report.loc[group, 'Кмпк: Кол-во ВУД'] += 1
 
     def check_kpkuo_ker(self, row: pd.Series, groups: List = []):
+        """
+        Проверка для Кпкуо и Кэр.
+        Заполняет поля в результирующем DF
+        в случае соответствия условиям.
+        """
         if row['Потерпевший СБЕР'] == 'true':
             if (
                 row['Дата возбуждения УД'] != '-' and
@@ -863,10 +1079,10 @@ class ES_individ():
                 row['Дата возбуждения УД'].date() <= self.kpkuo_ker_date_finish
             ):
                 for group in groups:
-                    self.report.loc[self.TB, 'Кпкуо/Кэр: Кол-во ВУД'] += 1
+                    self.report.loc[group, 'Кпкуо/Кэр: Кол-во ВУД'] += 1
                 if (
                     row['Дата передачи дела в суд первой инстанции'] != 'Отсутствует' and
-                    row['Дата передачи дела в суд первой инстанции'].date() <= row['Дата возбуждения УД'].date() + timedelta(days=365)
+                    row['Дата передачи дела в суд первой инстанции'].date() <= row['Дата возбуждения УД'].date() + relativedelta(year=1)
                 ):
                     for group in groups:
                         self.report.loc[group, 'Кпкуо/Кэр: Передано в суд'] += 1
@@ -875,6 +1091,11 @@ class ES_individ():
                         self.report.loc[group, 'Кпкуо/Кэр: Установлено лиц'] += 1
 
     def check_keppl(self, row: pd.Series, groups: List = []):
+        """
+        Проверка для Кэппл.
+        Заполняет поля в результирующем DF
+        в случае соответствия условиям.
+        """
         if row['Потерпевший СБЕР'] == 'true':
             if (
                 row['Дата возбуждения УД'] != '-' and
@@ -884,7 +1105,7 @@ class ES_individ():
                 for group in groups:
                     self.report.loc[group, 'Кэппл: Кол-во ВУД'] += 1
                 if row['Дата передачи дела в суд первой инстанции'] != 'Отсутствует':
-                    if row['Дата передачи дела в суд первой инстанции'].date() <= row['Дата возбуждения УД'].date() + timedelta(days=365):
+                    if row['Дата передачи дела в суд первой инстанции'].date() <= row['Дата возбуждения УД'].date() + relativedelta(year=1):
                         for group in groups:
                             self.report.loc[
                                 group,
@@ -898,40 +1119,139 @@ class ES_individ():
                             ] += 1
 
     def check_kevu(self, row: pd.Series, groups: List = []):
+        """
+        Проверка для Кэву.
+        Заполняет поля в результирующем DF
+        в случае соответствия условиям.
+        """
         if row['Потерпевший СБЕР'] == 'true':
             if (
                 row['Дата подачи ЗОП'] != '-' and
                 row['Дата подачи ЗОП'].date() >= self.kevu_date_start and
                 row['Дата подачи ЗОП'].date() <= self.kevu_date_finish
             ):
-                if row['Сумма ущерба'] != '-':
+                if row['Ущерб возмещенный'] == '-':
+                    row['Ущерб возмещенный'] = 0
+                if row['Сумма ущерба'] == '-':
+                    row['Сумма ущерба'] = 0
+                if (
+                    float(row['Сумма ущерба']) == 0 and
+                    float(row['Ущерб возмещенный']) != 0
+                ):
+                    self.abnormal.loc[len(self.abnormal.index)] = row
+                    win = sg.Window(
+                        'Аномальная карточка',
+                        [
+                            [sg.Table(
+                                [row.values.tolist()],
+                                headings=row.index.values.tolist(),
+                                vertical_scroll_only=False,
+                                justification='center',
+                                alternating_row_color=sg.theme_button_color()[1],
+                                selected_row_colors='white on black',
+                                num_rows=3
+                            )],
+                            [
+                                sg.Text('Сумма ущерба:', size=(25, 1)),
+                                sg.Input(
+                                    default_text=row['Сумма ущерба'],
+                                    key='sum_damage',
+                                    enable_events=True,
+                                    expand_x=True
+                                )
+                            ],
+                            [
+                                sg.Text('Ущерб возмещенный:', size=(25, 1)),
+                                sg.Input(
+                                    default_text=row['Ущерб возмещенный'],
+                                    key='comp_damage',
+                                    enable_events=True,
+                                    expand_x=True
+                                )
+                            ],
+                            [
+                                sg.Button('Учитывать', key='allow'),
+                                sg.Button('Не учитывать', key='dont_allow')
+                            ]
+                        ],
+                        size=(600, 190)
+                    )
+                    while True:
+                        e, v = win.read()
+                        if e in (sg.WIN_CLOSED, 'dont_allow'):
+                            break
+                        elif e == 'allow':
+                            row['Сумма ущерба'] = v['sum_damage']
+                            row['Ущерб возмещенный'] = v['comp_damage']
+                            break
+                    win.close()
+                    if e == 'allow':
+                        for group in groups:
+                            if float(row['Сумма ущерба']) > 0:
+                                self.report.loc[
+                                    group,
+                                    'Кэву: Сумма'
+                                ] += (
+                                    float(row['Ущерб возмещенный']) /
+                                    float(row['Сумма ущерба'])
+                                )
+                            self.report.loc[
+                                group,
+                                'Кэву: Кол-во'
+                            ] += 1
+                elif float(row['Сумма ущерба']) > 0:
                     for group in groups:
+                        summ = (
+                            float(row['Ущерб возмещенный']) /
+                            float(row['Сумма ущерба'])
+                        )
+                        if summ > 1:
+                            summ = 1
                         self.report.loc[
                             group,
-                            'Кэву: Сумма прич.'
-                        ] += float(row['Сумма ущерба'])
-                if row['Ущерб возмещенный'] != '-':
-                    for group in groups:
+                            'Кэву: Сумма'
+                        ] += summ
                         self.report.loc[
                             group,
-                            'Кэву: Сумма возм.'
-                        ] += float(row['Ущерб возмещенный'])
+                            'Кэву: Кол-во'
+                        ] += 1
 
     def calc(self):
+        """
+        Расчитывает коэффициенты в результирующем DF.
+        """
         self.report['Кпкуо'] = round(
-            100 * self.report['Кпкуо/Кэр: Передано в суд'] / self.report['Кпкуо/Кэр: Кол-во ВУД'], 2
+            100 *
+            self.report['Кпкуо/Кэр: Передано в суд'] /
+            self.report['Кпкуо/Кэр: Кол-во ВУД'],
+            2
         )
         self.report['Кэр'] = round(
-            100 * self.report['Кпкуо/Кэр: Установлено лиц'] / self.report['Кпкуо/Кэр: Кол-во ВУД'], 2
+            100 *
+            self.report['Кпкуо/Кэр: Установлено лиц'] /
+            self.report['Кпкуо/Кэр: Кол-во ВУД'],
+            2
         )
         self.report['Кэппл'] = round(
-            100 * self.report['Кэппл: Передано в суд(>365)'] / (self.report['Кэппл: Кол-во ВУД'] - self.report['Кэппл: Передано в суд(<=365)']), 2
+            100 *
+            self.report['Кэппл: Передано в суд(>365)'] /
+            (
+                self.report['Кэппл: Кол-во ВУД'] -
+                self.report['Кэппл: Передано в суд(<=365)']
+            ),
+            2
         )
         self.report['Кэву'] = round(
-            100 * self.report['Кэву: Сумма возм.'] / self.report['Кэву: Сумма прич.'], 2
+            100 *
+            self.report['Кэву: Сумма'] /
+            self.report['Кэву: Кол-во'],
+            2
         )
         self.report['Кмпк'] = round(
-            100 * self.report['Кмпк: Кол-во ВУД'] / self.report['Кмпк: Кол-во заяв.'], 2
+            100 *
+            self.report['Кмпк: Кол-во ВУД'] /
+            self.report['Кмпк: Кол-во заяв.'],
+            2
         )
         self.report.replace([np.inf, -np.inf, np.nan], 0, inplace=True)
         self.report.rename(
@@ -977,34 +1297,67 @@ class ES_legal():
     def __init__(
         self,
         df,
+        target,
         koup_kvu_date_start,
         koup_kvu_date_finish,
         registries
     ):
         self.df = df
+        self.target = target
         self.koup_kvu_date_start = koup_kvu_date_start
         self.koup_kvu_date_finish = koup_kvu_date_finish
         self.registries = registries
         self.TB = df.loc[0, 'ТБ/ЦА']
         self.GOSB = df['Подразделение'].unique().tolist()
+        self.GOSB.sort()
         self.report = pd.DataFrame(
             columns=[
                 'Коуп', 'Кву',
-                'Коуп: Кол-во', 'Коуп: Кол-во ВУД', 'Коуп: Кол-во искл.', 'Коуп: Кол-во доб.',
-                'Кву: Сумма', 'Кву: Кол-во', 'Кву: Кол-во искл.', 'Кву: Кол-во доб.',
+                'Коуп: Кол-во', 'Коуп: Кол-во ВУД',
+                'Коуп: Кол-во искл.', 'Коуп: Кол-во доб.',
+                'Кву: Сумма', 'Кву: Кол-во',
+                'Кву: Кол-во искл.', 'Кву: Кол-во доб.',
             ],
-            index=[self.TB] + list(self.GROUP_GOSB[self.TB].keys()) + self.GOSB,
+            index=(
+                [self.TB] +
+                list(self.GROUP_GOSB.get(self.TB, {}).keys()) +
+                self.GOSB
+            ),
             data=0,
         )
-        self.report['Кву: Ущерб возмещенный/Сумма ущерба'] = [[] for _ in self.report.index.values]
         self.update()
 
     def update(self):
+        """
+        Фильтрует записи DataFrame.
+        Для прошедших фильтрацию создает группы
+        к которым относится запись и вызывает функции
+        для проверки вхождения в коэффициенты.
+        """
+        self.df["Номер карточки"] = self.df["Номер карточки"].apply(
+            lambda x: int(str(x).split('/')[0])
+        )
+        for reg, name in (
+            ('legal_kvu_kvupp_kpupp', 'КВУ'),
+            ('legal_koup_zpp_vpp', 'КОУП'),
+            ('legal_koup_kur', 'КОУП'),
+            ('legal_kvu_kur', 'КВУ'),
+        ):
+            self.registries[reg][f'{name}_Номер карточки'] = self.registries[reg][f'{name}_Номер карточки'].apply(
+                lambda x: int(str(x).split('/')[0])
+            )
         for i, row in self.df.iterrows():
-            groups = [self.TB, row['Подразделение']] + [group for group, gosbs in self.GROUP_GOSB[self.TB].items() if row['Подразделение'].strip() in gosbs]
+            groups = (
+                [self.TB, row['Подразделение']] +
+                [
+                    group for group, gosbs
+                    in self.GROUP_GOSB.get(self.TB, {}).items()
+                    if row['Подразделение'].strip() in gosbs
+                ]
+            )
             if (
                 row['Статус КЗОП'] == 'Архив' or
-                row['Вид события'] != 'Мошенничество в корпоративном кредитовании' or
+                'Мошенничество в корпоративном кредитовании' not in row['Вид события'] or
                 row['Дата подачи ЗОП'] == '-' or
                 row['Дата подачи ЗОП'].date() < self.koup_kvu_date_start or
                 row['Дата подачи ЗОП'].date() > self.koup_kvu_date_finish
@@ -1017,14 +1370,27 @@ class ES_legal():
         self.calc()
 
     def check_koup(self, row: pd.Series, groups: List = []):
+        """
+        Проверка для Коуп.
+        Заполняет поля в результирующем DF
+        в случае соответствия условиям.
+        """
         for group in groups:
             self.report.loc[group, 'Коуп: Кол-во'] += 1
-            if row['Дата возбуждения УД'] != '-' and row['Номер карточки'] not in self.registries['legal_koup_kur']['КОУП_Номер карточки'].values:
+            if (
+                row['Дата возбуждения УД'] != '-' and
+                row['Номер карточки'] not in self.registries['legal_koup_kur']['КОУП_Номер карточки'].values
+            ):
                 self.report.loc[group, 'Коуп: Кол-во ВУД'] += 1
             if row['Номер карточки'] in self.registries['legal_koup_kur']['КОУП_Номер карточки'].values:
                 self.report.loc[group, 'Коуп: Кол-во искл.'] += 1
 
     def check_kvu(self, row: pd.Series, groups: List = []):
+        """
+        Проверка для Кву.
+        Заполняет поля в результирующем DF
+        в случае соответствия условиям.
+        """
         for group in groups:
             if (
                 row['Сумма ущерба'] != '-' and
@@ -1032,39 +1398,84 @@ class ES_legal():
             ):
                 if row['Ущерб возмещенный'] == '-':
                     row['Ущерб возмещенный'] = 0
-                self.report.loc[group, 'Кву: Сумма'] += float(row['Ущерб возмещенный'])/float(row['Сумма ущерба'])
+                self.report.loc[group, 'Кву: Сумма'] += (
+                    float(row['Ущерб возмещенный']) /
+                    float(row['Сумма ущерба'])
+                )
                 self.report.loc[group, 'Кву: Кол-во'] += 1
             if row['Номер карточки'] in self.registries['legal_kvu_kur']['КВУ_Номер карточки'].values:
                 self.report.loc[group, 'Кву: Кол-во искл.'] += 1
 
     def check_kvu_kvupp_kpupp(self):
+        """
+        Проверка реестра для добавлений в Кву.
+        Заполняет поля в результирующем DF
+        в случае соответствия условиям.
+        """
         for i, row in self.registries['legal_kvu_kvupp_kpupp'].iterrows():
             if row['КВУ_ТБ'] == self.TB:
-                groups = [self.TB, row['Подразделение']] + [group for group, gosbs in self.GROUP_GOSB[self.TB].items() if row['Подразделение'].strip() in gosbs]
+                groups = (
+                    [self.TB, row['Подразделение']] +
+                    [
+                        group for group, gosbs
+                        in self.GROUP_GOSB.get(self.TB, {}).items()
+                        if row['Подразделение'].strip() in gosbs
+                    ]
+                    )
                 if row['КВУ_Номер карточки'] in self.df['Номер карточки']:
                     continue
                 for group in groups:
-                    self.report.loc[group, 'Кву: Сумма'] += row['КВУПП_Ущерб возмещеннный']/row['КПУПП_Ущерб причиненный']
+                    self.report.loc[group, 'Кву: Сумма'] += (
+                        row['КВУПП_Ущерб возмещеннный'] /
+                        row['КПУПП_Ущерб причиненный']
+                    )
                     self.report.loc[group, 'Кву: Кол-во'] += 1
                     self.report.loc[group, 'Кву: Кол-во доб.'] += 1
 
     def check_koup_zpp_vpp(self):
+        """
+        Проверка реестра для добавлений в Коуп.
+        Заполняет поля в результирующем DF
+        в случае соответствия условиям.
+        """
         for i, row in self.registries['legal_koup_zpp_vpp'].iterrows():
             if row['КОУП_ТБ'] == self.TB:
-                groups = [self.TB, row['Подразделение']] + [group for group, gosbs in self.GROUP_GOSB[self.TB].items() if row['Подразделение'].strip() in gosbs]
+                groups = (
+                    [self.TB, row['Подразделение']] +
+                    [
+                        group for group, gosbs
+                        in self.GROUP_GOSB.get(self.TB, {}).items()
+                        if row['Подразделение'].strip() in gosbs
+                    ]
+                )
                 if row['КОУП_Номер карточки'] in self.df['Номер карточки']:
                     continue
                 for group in groups:
                     self.report.loc[group, 'Коуп: Кол-во доб.'] += 1
 
     def calc(self):
+        """
+        Расчитывает коэффициенты в результирующем DF.
+        """
         self.report['Коуп'] = round(
-            100 * (self.report['Коуп: Кол-во ВУД'] + self.report['Коуп: Кол-во доб.']) / (self.report['Коуп: Кол-во'] - self.report['Коуп: Кол-во искл.'] + self.report['Коуп: Кол-во доб.']), 2
+            100 *
+            (
+                self.report['Коуп: Кол-во ВУД'] +
+                self.report['Коуп: Кол-во доб.']
+            ) /
+            (
+                self.report['Коуп: Кол-во'] -
+                self.report['Коуп: Кол-во искл.'] +
+                self.report['Коуп: Кол-во доб.']
+            ),
+            2
         )
         self.report['Кву'] = round(
             100 * self.report['Кву: Сумма'] / self.report['Кву: Кол-во'], 2
         )
-        self.report.replace([np.inf, -np.inf, np.nan], 0, inplace=True)
+        self.report.replace([np.inf, -np.inf], 0, inplace=True)
+        self.report['Коуп'].replace(np.nan, self.target, inplace=True)
+        self.report['Кву'].replace(np.nan, '-', inplace=True)
         self.report.rename(
             index={'-': 'Аппарат'},
             inplace=True,
