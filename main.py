@@ -1082,7 +1082,7 @@ class ES_individ():
                     self.report.loc[group, 'Кпкуо/Кэр: Кол-во ВУД'] += 1
                 if (
                     row['Дата передачи дела в суд первой инстанции'] != 'Отсутствует' and
-                    row['Дата передачи дела в суд первой инстанции'].date() <= row['Дата возбуждения УД'].date() + relativedelta(year=1)
+                    row['Дата передачи дела в суд первой инстанции'].date() <= row['Дата возбуждения УД'].date() + relativedelta(years=1)
                 ):
                     for group in groups:
                         self.report.loc[group, 'Кпкуо/Кэр: Передано в суд'] += 1
@@ -1105,7 +1105,7 @@ class ES_individ():
                 for group in groups:
                     self.report.loc[group, 'Кэппл: Кол-во ВУД'] += 1
                 if row['Дата передачи дела в суд первой инстанции'] != 'Отсутствует':
-                    if row['Дата передачи дела в суд первой инстанции'].date() <= row['Дата возбуждения УД'].date() + relativedelta(year=1):
+                    if row['Дата передачи дела в суд первой инстанции'].date() <= row['Дата возбуждения УД'].date() + relativedelta(years=1):
                         for group in groups:
                             self.report.loc[
                                 group,
