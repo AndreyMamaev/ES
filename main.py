@@ -2425,6 +2425,14 @@ class ES_legal():
         в случае соответствия условиям.
         """
         if (
+            row['Номер карточки'] in
+            self.registries['legal_koup_kur']['КОУП_Номер карточки'].values
+        ):
+            for group in groups:
+                self.report.loc[(self.TB, group), ('Коуп', 'Кол-во искл.')] += 1
+            self.koup_excluded_cards.loc[len(self.koup_excluded_cards.index)] = row
+            return
+        if (
             self.interim and
             row['Дата подачи ЗОП'].date() >= (
                 self.koup_kvu_date_finish -
@@ -2434,13 +2442,6 @@ class ES_legal():
         ):
             return
         for group in groups:
-            if (
-                row['Номер карточки'] in
-                self.registries['legal_koup_kur']['КОУП_Номер карточки'].values
-            ):
-                self.report.loc[(self.TB, group), ('Коуп', 'Кол-во искл.')] += 1
-                self.koup_excluded_cards.loc[len(self.koup_excluded_cards.index)] = row
-                continue
             self.report.loc[(self.TB, group), ('Коуп', 'Кол-во')] += 1
             if row['Дата возбуждения УД'] != '-':
                 self.report.loc[(self.TB, group), ('Коуп', 'Кол-во ВУД')] += 1
@@ -2452,6 +2453,14 @@ class ES_legal():
         в случае соответствия условиям.
         """
         if (
+            row['Номер карточки'] in
+            self.registries['legal_kvu_kur']['КВУ_Номер карточки'].values
+        ):
+            for group in groups:
+                self.report.loc[(self.TB, group), ('Кву', 'Кол-во искл.')] += 1
+            self.kvu_excluded_cards.loc[len(self.kvu_excluded_cards.index)] = row
+            return
+        if (
             self.interim and
             row['Дата подачи ЗОП'].date() >= (
                 self.koup_kvu_date_finish -
@@ -2461,13 +2470,6 @@ class ES_legal():
             self.interim_list.loc[len(self.interim_list.index)] = row
             return
         for group in groups:
-            if (
-                row['Номер карточки'] in
-                self.registries['legal_kvu_kur']['КВУ_Номер карточки'].values
-            ):
-                self.report.loc[(self.TB, group), ('Кву', 'Кол-во искл.')] += 1
-                self.kvu_excluded_cards.loc[len(self.kvu_excluded_cards.index)] = row
-                continue
             if row['Сумма ущерба'] != '-':
                 if row['Ущерб возмещенный'] == '-':
                     row['Ущерб возмещенный'] = 0
@@ -2494,13 +2496,13 @@ class ES_legal():
                 ]
             )
             for group in groups:
-                if (
-                    row['Номер карточки'] in
-                    self.registries['legal_kvu_kur']['КВУ_Номер карточки'].values
-                ):
-                    self.report.loc[(self.TB, group), ('Кву', 'Кол-во искл.')] += 1
-                    self.kvu_excluded_cards.loc[len(self.kvu_excluded_cards.index)] = row
-                    continue
+                # if (
+                #     row['Номер карточки'] in
+                #     self.registries['legal_kvu_kur']['КВУ_Номер карточки'].values
+                # ):
+                #     self.report.loc[(self.TB, group), ('Кву', 'Кол-во искл.')] += 1
+                #     self.kvu_excluded_cards.loc[len(self.kvu_excluded_cards.index)] = row
+                #     continue
                 if row['Сумма ущерба'] != '-':
                     if row['Ущерб возмещенный'] == '-':
                         row['Ущерб возмещенный'] = 0
